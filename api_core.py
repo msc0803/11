@@ -123,19 +123,22 @@ def _ensure_chrome_debug():
 
 
 def get_token_from_browser() -> str:
-    _ensure_chrome_debug()  # 自动启动 Chrome 调试模式
-
     async def _fetch():
-        import time
-        # 等待 sucaiwang 标签页出现（最多 30 秒，等用户登录）
-        for _ in range(60):
-            tabs = json.loads(urllib.request.urlopen("http://localhost:9222/json", timeout=5).read())
-            tab = next((t for t in tabs if "sucaiwang.zhishangsoft.com" in t.get("url", "")), None)
-            if tab:
-                break
-            await asyncio.sleep(0.5)
+        # 列出所有标签页
+        tabs = json.loads(urllib.request.urlopen("http://localhost:9222/json", timeout=5).read())
+        # 优先找 sucaiwang 标签页，找不到就用第一个普通页面
+        tab = next((t for t in tabs if "sucaiwang.zhishangsoft.com" in t.get("url", "")), None)
         if not tab:
-            raise RuntimeError("未找到 sucaiwang 标签页，请在 Chrome 中打开并登录")
+            tab = next((t for t in tabs if t.get("type") == "page"), None)
+        if not tab:
+            raise RuntimeError("未找到可用标签页，请在浏览器中打开 sucaiwang.zhishangsoft.com 并登录")
+        ws_url = tab["webSocketDebuggerUrl"]
+        async with websockets.connect(ws_url) as ws:
+            cmd = json.dumps({"id": 1, "method": "Runtime.evaluate",
+                              "params": {"expression": "localStorage.getItem('material_token')"}})
+            await ws.send(cmd)
+            resp = json.loads(await ws.recv())
+            return resp.get("result", {}).get("result", {}).get("value", "")
         ws_url = tab["webSocketDebuggerUrl"]
         async with websockets.connect(ws_url) as ws:
             cmd = json.dumps({"id": 1, "method": "Runtime.evaluate",

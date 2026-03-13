@@ -332,20 +332,38 @@ class MainWindow(QMainWindow):
             self._log(f"结果目录已更改: {d}")
 
     def _connect_token(self):
-        self._log("正在自动启动 Chrome 并获取 Token...")
+        self._log("正在连接浏览器获取 Token...")
         try:
             self.token = api_core.get_token()
             self._log("Token 获取成功")
             self.status_bar.showMessage("Token 就绪")
         except Exception as e:
-            self._log(f"Token 获取失败: {e}")
-            self._log("请确认已安装 Chrome，并在弹出的浏览器中登录 sucaiwang.zhishangsoft.com 后点击「刷新 Token」")
-            self.status_bar.showMessage("Token 未就绪 - 请登录后点击「刷新 Token」")
+            self._log(f"自动获取失败: {e}")
+            self._log("请点击「刷新 Token」手动获取")
+            self.status_bar.showMessage("请点击「刷新 Token」")
 
     def _refresh_token(self):
+        # 先确保浏览器以调试模式启动
+        try:
+            api_core._ensure_chrome_debug()
+            self._log("浏览器已启动，请在浏览器中登录 sucaiwang.zhishangsoft.com")
+        except Exception as e:
+            self._log(f"浏览器启动失败: {e}")
+
+        # 弹出提示，等用户登录完点确认
+        QMessageBox.information(
+            self, "请登录",
+            "请在弹出的浏览器中登录 sucaiwang.zhishangsoft.com\n\n登录完成后点击「确定」"
+        )
+
         try:
             self.token = api_core.get_token_from_browser()
             api_core.save_token(self.token)
+            self._log("Token 获取成功")
+            self.status_bar.showMessage("Token 就绪")
+        except Exception as e:
+            self._log(f"Token 获取失败: {e}")
+            QMessageBox.warning(self, "失败", f"获取失败，请确认已在浏览器中登录\n\n{e}")
             self._log("Token 刷新成功")
             self.status_bar.showMessage("Token 就绪")
         except Exception as e:
