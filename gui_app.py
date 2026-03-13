@@ -26,7 +26,32 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 
 # ─────────────────────────── 后台线程 ────────────────────────────
 
-class SearchWorker(QThread):
+class TokenWorker(QThread):
+    success = pyqtSignal(str)
+    failed  = pyqtSignal(str)
+    log     = pyqtSignal(str)
+
+    def __init__(self, ask_login=False):
+        super().__init__()
+        self.ask_login = ask_login
+
+    def run(self):
+        try:
+            if not self.ask_login:
+                # 先试缓存
+                token = api_core.load_cached_token()
+                if token and api_core.is_token_valid(token):
+                    self.success.emit(token)
+                    return
+            # 启动浏览器
+            self.log.emit("正在启动浏览器...")
+            api_core._ensure_chrome_debug()
+            self.log.emit("浏览器已就绪，请登录 sucaiwang.zhishangsoft.com 后点「已登录」")
+            token = api_core.get_token_from_browser()
+            api_core.save_token(token)
+            self.success.emit(token)
+        except Exception as e:
+            self.failed.emit(str(e))
     progress     = pyqtSignal(int, int)
     row_done     = pyqtSignal(int, str, str, str, str, str)  # idx,name,status,ids,names,remark
     log          = pyqtSignal(str)
@@ -332,44 +357,39 @@ class MainWindow(QMainWindow):
             self._log(f"结果目录已更改: {d}")
 
     def _connect_token(self):
-        self._log("正在连接浏览器获取 Token...")
-        try:
-            self.token = api_core.get_token()
-            self._log("Token 获取成功")
-            self.status_bar.showMessage("Token 就绪")
-        except Exception as e:
-            self._log(f"自动获取失败: {e}")
-            self._log("请点击「刷新 Token」手动获取")
-            self.status_bar.showMessage("请点击「刷新 Token」")
+        self._log("正在获取 Token...")
+        self.status_bar.showMessage("正在获取 Token...")
+        self._token_worker = TokenWorker(ask_login=False)
+        self._token_worker.log.connect(self._log)
+        self._token_worker.success.connect(self._on_token_ok)
+        self._token_worker.failed.connect(self._on_token_fail_silent)
+        self._token_worker.start()
 
     def _refresh_token(self):
-        # 先确保浏览器以调试模式启动
-        try:
-            api_core._ensure_chrome_debug()
-            self._log("浏览器已启动，请在浏览器中登录 sucaiwang.zhishangsoft.com")
-        except Exception as e:
-            self._log(f"浏览器启动失败: {e}")
+        self._log("正在关闭浏览器并以调试模式重新启动...")
+        self.btn_token.setEnabled(False)
+        self._token_worker = TokenWorker(ask_login=True)
+        self._token_worker.log.connect(self._log)
+        self._token_worker.success.connect(self._on_token_ok)
+        self._token_worker.failed.connect(self._on_token_fail)
+        self._token_worker.start()
 
-        # 弹出提示，等用户登录完点确认
-        QMessageBox.information(
-            self, "请登录",
-            "请在弹出的浏览器中登录 sucaiwang.zhishangsoft.com\n\n登录完成后点击「确定」"
-        )
+    def _on_token_ok(self, token):
+        self.token = token
+        self._log("Token 获取成功")
+        self.status_bar.showMessage("Token 就绪")
+        self.btn_token.setEnabled(True)
 
-        try:
-            self.token = api_core.get_token_from_browser()
-            api_core.save_token(self.token)
-            self._log("Token 获取成功")
-            self.status_bar.showMessage("Token 就绪")
-        except Exception as e:
-            self._log(f"Token 获取失败: {e}")
-            QMessageBox.warning(self, "失败", f"获取失败，请确认已在浏览器中登录\n\n{e}")
-            self._log("Token 刷新成功")
-            self.status_bar.showMessage("Token 就绪")
-        except Exception as e:
-            self._log(f"Token 刷新失败: {e}")
-            QMessageBox.warning(self, "Token 失败",
-                                f"请确保 Chrome 已打开并登录\n\n{e}")
+    def _on_token_fail_silent(self, err):
+        self._log(f"自动获取失败，请点「刷新 Token」: {err}")
+        self.status_bar.showMessage("请点「刷新 Token」并在浏览器登录")
+        self.btn_token.setEnabled(True)
+
+    def _on_token_fail(self, err):
+        self._log(f"Token 获取失败: {err}")
+        self.status_bar.showMessage("Token 获取失败")
+        self.btn_token.setEnabled(True)
+        QMessageBox.warning(self, "失败", f"获取失败，请确认浏览器已打开并登录\n\n{err}")
 
     # ──────────── 日志 ────────────
 

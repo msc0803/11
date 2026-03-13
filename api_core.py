@@ -85,11 +85,16 @@ def _ensure_chrome_debug():
     browser_path = None
 
     if sys_name == "Windows":
+        # 先关掉已有浏览器进程（否则调试端口启动会被合并到已有进程，9222不会开）
+        subprocess.run(["taskkill", "/F", "/IM", "msedge.exe"],
+                       capture_output=True)
+        subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"],
+                       capture_output=True)
+        time.sleep(1)
+
         candidates = [
-            # Edge
             r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
             r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-            # Chrome
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         ]
@@ -110,8 +115,8 @@ def _ensure_chrome_debug():
     if not browser_path:
         raise RuntimeError("未找到 Chrome 或 Edge 浏览器，请手动安装后重试")
 
-    # 等待浏览器启动
-    for _ in range(20):
+    # 等待浏览器启动（最多15秒）
+    for _ in range(30):
         time.sleep(0.5)
         try:
             urllib.request.urlopen("http://localhost:9222/json", timeout=1)
