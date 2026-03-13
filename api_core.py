@@ -73,7 +73,7 @@ def save_token(token: str):
 
 
 def _ensure_chrome_debug():
-    """确保 Chrome 以调试模式运行，如果没有就自动启动"""
+    """确保 Chrome 或 Edge 以调试模式运行，如果没有就自动启动"""
     import subprocess, platform, time
     try:
         urllib.request.urlopen("http://localhost:9222/json", timeout=2)
@@ -82,23 +82,35 @@ def _ensure_chrome_debug():
         pass
 
     sys_name = platform.system()
+    browser_path = None
+
     if sys_name == "Windows":
-        paths = [
+        candidates = [
+            # Edge
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            # Chrome
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         ]
-        chrome = next((p for p in paths if os.path.exists(p)), None)
-        if chrome:
-            subprocess.Popen([chrome, "--remote-debugging-port=9222",
+        browser_path = next((p for p in candidates if os.path.exists(p)), None)
+        if browser_path:
+            subprocess.Popen([browser_path, "--remote-debugging-port=9222",
                               "https://sucaiwang.zhishangsoft.com"])
     elif sys_name == "Darwin":
-        subprocess.Popen([
+        candidates = [
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "--remote-debugging-port=9222",
-            "https://sucaiwang.zhishangsoft.com"
-        ])
+        ]
+        browser_path = next((p for p in candidates if os.path.exists(p)), None)
+        if browser_path:
+            subprocess.Popen([browser_path, "--remote-debugging-port=9222",
+                              "https://sucaiwang.zhishangsoft.com"])
 
-    # 等待 Chrome 启动
+    if not browser_path:
+        raise RuntimeError("未找到 Chrome 或 Edge 浏览器，请手动安装后重试")
+
+    # 等待浏览器启动
     for _ in range(20):
         time.sleep(0.5)
         try:
@@ -107,7 +119,7 @@ def _ensure_chrome_debug():
         except Exception:
             pass
 
-    raise RuntimeError("Chrome 启动超时，请手动运行 Chrome 并登录 sucaiwang.zhishangsoft.com")
+    raise RuntimeError("浏览器启动超时，请手动打开浏览器并登录 sucaiwang.zhishangsoft.com")
 
 
 def get_token_from_browser() -> str:
