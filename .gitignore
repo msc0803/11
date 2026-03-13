@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.token_cache
+results/
+*.spec
+build/
+dist/
