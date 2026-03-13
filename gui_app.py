@@ -332,13 +332,15 @@ class MainWindow(QMainWindow):
             self._log(f"结果目录已更改: {d}")
 
     def _connect_token(self):
+        self._log("正在自动启动 Chrome 并获取 Token...")
         try:
             self.token = api_core.get_token()
             self._log("Token 获取成功")
             self.status_bar.showMessage("Token 就绪")
         except Exception as e:
             self._log(f"Token 获取失败: {e}")
-            self.status_bar.showMessage("Token 未就绪")
+            self._log("请确认已安装 Chrome，并在弹出的浏览器中登录 sucaiwang.zhishangsoft.com 后点击「刷新 Token」")
+            self.status_bar.showMessage("Token 未就绪 - 请登录后点击「刷新 Token」")
 
     def _refresh_token(self):
         try:

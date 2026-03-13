@@ -72,10 +72,56 @@ def save_token(token: str):
         f.write(token)
 
 
+def _ensure_chrome_debug():
+    """确保 Chrome 以调试模式运行，如果没有就自动启动"""
+    import subprocess, platform, time
+    try:
+        urllib.request.urlopen("http://localhost:9222/json", timeout=2)
+        return  # 已经在运行
+    except Exception:
+        pass
+
+    sys_name = platform.system()
+    if sys_name == "Windows":
+        paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+        chrome = next((p for p in paths if os.path.exists(p)), None)
+        if chrome:
+            subprocess.Popen([chrome, "--remote-debugging-port=9222",
+                              "https://sucaiwang.zhishangsoft.com"])
+    elif sys_name == "Darwin":
+        subprocess.Popen([
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "--remote-debugging-port=9222",
+            "https://sucaiwang.zhishangsoft.com"
+        ])
+
+    # 等待 Chrome 启动
+    for _ in range(20):
+        time.sleep(0.5)
+        try:
+            urllib.request.urlopen("http://localhost:9222/json", timeout=1)
+            return
+        except Exception:
+            pass
+
+    raise RuntimeError("Chrome 启动超时，请手动运行 Chrome 并登录 sucaiwang.zhishangsoft.com")
+
+
 def get_token_from_browser() -> str:
+    _ensure_chrome_debug()  # 自动启动 Chrome 调试模式
+
     async def _fetch():
-        tabs = json.loads(urllib.request.urlopen("http://localhost:9222/json", timeout=5).read())
-        tab = next((t for t in tabs if "sucaiwang.zhishangsoft.com" in t.get("url", "")), None)
+        import time
+        # 等待 sucaiwang 标签页出现（最多 30 秒，等用户登录）
+        for _ in range(60):
+            tabs = json.loads(urllib.request.urlopen("http://localhost:9222/json", timeout=5).read())
+            tab = next((t for t in tabs if "sucaiwang.zhishangsoft.com" in t.get("url", "")), None)
+            if tab:
+                break
+            await asyncio.sleep(0.5)
         if not tab:
             raise RuntimeError("未找到 sucaiwang 标签页，请在 Chrome 中打开并登录")
         ws_url = tab["webSocketDebuggerUrl"]
