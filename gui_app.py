@@ -38,22 +38,23 @@ class TokenWorker(QThread):
     def run(self):
         try:
             if not self.ask_login:
-                # 先试缓存
                 token = api_core.load_cached_token()
                 if token and api_core.is_token_valid(token):
                     self.success.emit(token)
                     return
-            # 启动浏览器
             self.log.emit("正在启动浏览器...")
             api_core._ensure_chrome_debug()
-            self.log.emit("浏览器已就绪，请登录 sucaiwang.zhishangsoft.com 后点「已登录」")
+            self.log.emit("浏览器已就绪")
             token = api_core.get_token_from_browser()
             api_core.save_token(token)
             self.success.emit(token)
         except Exception as e:
             self.failed.emit(str(e))
+
+
+class SearchWorker(QThread):
     progress     = pyqtSignal(int, int)
-    row_done     = pyqtSignal(int, str, str, str, str, str)  # idx,name,status,ids,names,remark
+    row_done     = pyqtSignal(int, str, str, str, str, str)
     log          = pyqtSignal(str)
     finished_signal = pyqtSignal(int, int, int, int)
     token_refreshed = pyqtSignal(str)
