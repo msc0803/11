@@ -208,6 +208,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("视频素材批量查询工具")
         self.setMinimumSize(1200, 800)
+        _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_icon.ico")
+        if os.path.exists(_icon_path):
+            from PyQt6.QtGui import QIcon
+            self.setWindowIcon(QIcon(_icon_path))
 
         self.df             = None
         self.df_filtered    = None
@@ -1161,6 +1165,10 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_icon.ico")
+    if os.path.exists(_icon_path):
+        from PyQt6.QtGui import QIcon
+        app.setWindowIcon(QIcon(_icon_path))
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
