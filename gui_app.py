@@ -8,6 +8,21 @@ import math
 import pandas as pd
 from datetime import datetime
 
+def _read_numbers_file(path):
+    """读取 Apple Numbers 文件，返回 {sheet_name: DataFrame}"""
+    import numbers_parser
+    doc = numbers_parser.Document(path)
+    result = {}
+    for sheet in doc.sheets:
+        rows = sheet.tables[0].rows(values_only=True)
+        rows = list(rows)
+        if not rows:
+            result[sheet.name] = pd.DataFrame()
+            continue
+        df = pd.DataFrame(rows[1:], columns=rows[0])
+        result[sheet.name] = df
+    return result
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFileDialog, QComboBox, QTableWidget,
@@ -59,12 +74,13 @@ class SearchWorker(QThread):
     finished_signal = pyqtSignal(int, int, int, int)
     token_refreshed = pyqtSignal(str)
 
-    def __init__(self, df, name_col, start_row, token):
+    def __init__(self, df, name_col, start_row, token, max_count=60):
         super().__init__()
         self.df        = df
         self.name_col  = name_col
         self.start_row = start_row
         self.token     = token
+        self.max_count = max_count
         self._stop     = False
 
     def stop(self): self._stop = True
@@ -96,11 +112,11 @@ class SearchWorker(QThread):
 
             # 查询 + 限流重试
             self.log.emit(f"查询 [{done+1}/{total}]: {name}")
-            ok, vid, extra = api_core.search_video(self.token, name)
+            ok, vid, extra = api_core.search_video(self.token, name, self.max_count)
             for _ in range(3):
                 if extra.get("error", "").startswith("当前访问人数"):
                     time.sleep(3)
-                    ok, vid, extra = api_core.search_video(self.token, name)
+                    ok, vid, extra = api_core.search_video(self.token, name, self.max_count)
                 else:
                     break
 
@@ -111,7 +127,7 @@ class SearchWorker(QThread):
                     self.token = api_core.get_token_from_browser()
                     api_core.save_token(self.token)
                     self.token_refreshed.emit(self.token)
-                    ok, vid, extra = api_core.search_video(self.token, name)
+                    ok, vid, extra = api_core.search_video(self.token, name, self.max_count)
                 except Exception as e:
                     self.log.emit(f"Token 刷新失败: {e}")
 
@@ -214,68 +230,238 @@ class MainWindow(QMainWindow):
         root = QWidget()
         self.setCentralWidget(root)
         vbox = QVBoxLayout(root)
-        vbox.setContentsMargins(8, 8, 8, 8)
-        vbox.setSpacing(6)
+        vbox.setContentsMargins(10, 10, 10, 6)
+        vbox.setSpacing(8)
 
-        # === 文件区 ===
-        fg = QGroupBox("Excel 文件")
-        fl = QHBoxLayout(fg)
-        self.file_label  = QLabel("未选择文件")
-        self.file_label.setMinimumWidth(300)
-        btn_open = QPushButton("打开 Excel")
-        btn_open.setFixedWidth(90)
+        def _label(text, tip=None, bold=False):
+            lb = QLabel(text)
+            if bold:
+                lb.setStyleSheet("font-weight:bold")
+            if tip:
+                lb.setToolTip(tip)
+            return lb
+
+        def _btn(text, color, hover, slot, tip=None, width=None):
+            b = QPushButton(text)
+            b.setFixedHeight(36)
+            if width:
+                b.setFixedWidth(width)
+            b.setStyleSheet(
+                f"QPushButton{{background:{color};color:white;font-size:13px;"
+                f"border-radius:5px;padding:0 14px}}"
+                f"QPushButton:hover{{background:{hover}}}"
+                f"QPushButton:disabled{{background:#bdbdbd;color:#eee}}"
+            )
+            b.clicked.connect(slot)
+            if tip:
+                b.setToolTip(tip)
+            return b
+
+        # ═══════════════════════════════════════════
+        # 第一区：文件导入 & 设置
+        # ═══════════════════════════════════════════
+        fg = QGroupBox("第一步：导入表格文件")
+        fg.setStyleSheet("QGroupBox{font-weight:bold;font-size:13px;padding-top:6px}"
+                         "QGroupBox::title{subcontrol-origin:margin;left:10px}")
+        fg_layout = QVBoxLayout(fg)
+        fg_layout.setSpacing(6)
+
+        # 第一行：文件选择 + 工作表 + 搜索列
+        fl = QHBoxLayout()
+        fl.setSpacing(8)
+
+        btn_open = QPushButton("  选择文件")
+        btn_open.setFixedHeight(34)
+        btn_open.setFixedWidth(100)
+        btn_open.setStyleSheet(
+            "QPushButton{background:#1976D2;color:white;font-size:13px;"
+            "border-radius:5px;font-weight:bold}"
+            "QPushButton:hover{background:#1565C0}"
+        )
+        btn_open.setToolTip("支持 Excel (.xlsx/.xls)、CSV、Apple Numbers (.numbers)")
         btn_open.clicked.connect(self._open_file)
-        self.sheet_combo = QComboBox(); self.sheet_combo.setMinimumWidth(110)
-        self.sheet_combo.setPlaceholderText("工作表")
+
+        self.file_label = QLabel("未选择文件  （支持 .xlsx / .xls / .csv / .numbers）")
+        self.file_label.setStyleSheet("color:#555; font-size:12px")
+        self.file_label.setMinimumWidth(280)
+
+        self.sheet_combo = QComboBox()
+        self.sheet_combo.setMinimumWidth(110)
+        self.sheet_combo.setToolTip("选择要查询的工作表（Sheet）")
         self.sheet_combo.currentIndexChanged.connect(self._on_sheet_changed)
-        self.col_combo   = QComboBox(); self.col_combo.setMinimumWidth(140)
-        self.col_combo.setPlaceholderText("搜索列")
-        self.start_spin  = QSpinBox()
-        self.start_spin.setPrefix("起始行: "); self.start_spin.setMaximum(99999)
-        self.chk_header = QCheckBox("首行为表头")
-        self.chk_header.setChecked(True)
-        self.chk_header.setToolTip("勾选：Excel 第一行是列名；取消：第一行是数据")
+
+        self.col_combo = QComboBox()
+        self.col_combo.setMinimumWidth(200)
+        self.col_combo.setToolTip("选择「素材名称」所在列，程序将逐行取该列值查询接口")
+
+        self.max_count_combo = QComboBox()
+        self.max_count_combo.setFixedWidth(130)
+        self.max_count_combo.addItems(["每条最多 60 个", "每条最多 120 个", "每条最多 300 个", "每条获取全部"])
+        self.max_count_combo.setToolTip(
+            "接口为模糊搜索，一个关键词可能匹配多条视频：\n"
+            "• 最多 60 个：只取第一页，速度最快\n"
+            "• 最多 120/300 个：自动翻页，结果更全\n"
+            "• 获取全部：翻完所有页，关键词范围大时较慢"
+        )
+
         fl.addWidget(btn_open)
         fl.addWidget(self.file_label, 1)
-        fl.addWidget(QLabel("工作表:")); fl.addWidget(self.sheet_combo)
-        fl.addWidget(QLabel("搜索列:")); fl.addWidget(self.col_combo)
-        fl.addWidget(self.start_spin)
-        fl.addWidget(self.chk_header)
+        fl.addWidget(_label("工作表:", "选择 Sheet")); fl.addWidget(self.sheet_combo)
+        fl.addWidget(_label("素材名称列:", "选择包含素材名称的列")); fl.addWidget(self.col_combo)
+        fl.addWidget(_label("匹配数量:")); fl.addWidget(self.max_count_combo)
+        fg_layout.addLayout(fl)
+
+        # 第二行：表头设置 + 起始行
+        fl2 = QHBoxLayout()
+        fl2.setSpacing(16)
+
+        self.chk_header = QCheckBox("首行是表头（列名行）")
+        self.chk_header.setChecked(True)
+        self.chk_header.setToolTip(
+            "勾选（推荐）：表格第一行是列名，如「素材名称、素材ID...」\n"
+            "不勾选：表格第一行就是数据，没有列名行\n\n"
+            "切换后会自动重新加载表格"
+        )
+        self.chk_header.stateChanged.connect(self._on_header_changed)
+
+        self.start_spin = QSpinBox()
+        self.start_spin.setPrefix("从第 ")
+        self.start_spin.setSuffix(" 行开始查询")
+        self.start_spin.setMinimum(0)
+        self.start_spin.setMaximum(99999)
+        self.start_spin.setFixedWidth(160)
+        self.start_spin.setToolTip(
+            "断点续查 / 跳过指定行数：\n"
+            "• 0（默认）= 从头开始查全部数据行\n"
+            "• 有表头时：行号从 1 开始（第1行=第一条数据）\n"
+            "• 无表头时：行号从 1 开始（第1行=第一行数据）\n"
+            "• 例如填 50 = 跳过前 50 条，从第 51 条开始"
+        )
+
+        self.header_hint = QLabel("")
+        self.header_hint.setStyleSheet("color:#888; font-size:11px")
+        self._update_header_hint()
+
+        fl2.addWidget(self.chk_header)
+        fl2.addWidget(self.start_spin)
+        fl2.addWidget(self.header_hint)
+        fl2.addStretch()
+        fg_layout.addLayout(fl2)
+
         vbox.addWidget(fg)
 
-        # === 结果目录 ===
-        dir_row = QHBoxLayout()
-        dir_row.addWidget(QLabel("结果保存目录:"))
-        self.dir_label = QLabel(RESULTS_DIR)
-        self.dir_label.setStyleSheet("color:#1565C0; font-size:12px;")
-        self.dir_label.setMinimumWidth(300)
-        btn_dir = QPushButton("更改目录")
-        btn_dir.setFixedWidth(80)
-        btn_dir.clicked.connect(self._choose_results_dir)
-        dir_row.addWidget(self.dir_label, 1)
-        dir_row.addWidget(btn_dir)
-        vbox.addLayout(dir_row)
+        # ═══════════════════════════════════════════
+        # 第二区：操作按钮
+        # ═══════════════════════════════════════════
+        op_group = QGroupBox("第二步：查询操作")
+        op_group.setStyleSheet("QGroupBox{font-weight:bold;font-size:13px;padding-top:6px}"
+                               "QGroupBox::title{subcontrol-origin:margin;left:10px}")
+        op_layout = QHBoxLayout(op_group)
+        op_layout.setSpacing(8)
 
-        # === 筛选栏 ===
-        filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("筛选状态:"))
+        self.btn_search = _btn(
+            "▶  开始查询", "#43A047", "#2E7D32", self._start_search,
+            tip="按表格逐行查询素材，查询中可随时点「暂停」")
+        self.btn_stop = _btn(
+            "⏹  暂停", "#e53935", "#b71c1c", self._stop_search,
+            tip="停止当前查询，已查结果不丢失，下次可从断点继续")
+        self.btn_stop.setEnabled(False)
+
+        self.btn_requery_errors = _btn(
+            "重查错误行", "#8E24AA", "#6A1B9A", self._requery_errors,
+            tip="将状态为「错误」的行重置并重新查询")
+        self.btn_reset_all = _btn(
+            "重置全部重查", "#6D4C41", "#4E342E", self._reset_all,
+            tip="清空所有行的查询状态，从头开始重新查询全部行")
+
+        sep1 = QLabel("  |  ")
+        sep1.setStyleSheet("color:#ccc; font-size:18px")
+
+        self.btn_workbench = _btn(
+            "加入工作台", "#1E88E5", "#1565C0", self._add_to_workbench,
+            tip="将所有「找到」状态的视频 ID 批量推送到素材网工作台\n每批最多 200 个，超出自动分批并等待确认")
+
+        sep2 = QLabel("  |  ")
+        sep2.setStyleSheet("color:#ccc; font-size:18px")
+
+        self.btn_save = _btn(
+            "保存结果", "#FB8C00", "#E65100", self._save_excel,
+            tip="将当前表格（含查询结果列）另存为 Excel 文件")
+        self.btn_token = _btn(
+            "刷新登录", "#546E7A", "#37474F", self._refresh_token,
+            tip="Token 过期或查询报「请登录」时点此\n程序会自动打开浏览器，在浏览器登录后自动获取 Token")
+
+        for w in [self.btn_search, self.btn_stop,
+                  self.btn_requery_errors, self.btn_reset_all,
+                  sep1,
+                  self.btn_workbench,
+                  sep2,
+                  self.btn_save, self.btn_token]:
+            op_layout.addWidget(w)
+        op_layout.addStretch()
+
+        # Token 状态指示灯
+        self.token_indicator = QLabel("● Token 未就绪")
+        self.token_indicator.setStyleSheet("color:#e53935; font-size:12px; font-weight:bold")
+        op_layout.addWidget(self.token_indicator)
+
+        vbox.addWidget(op_group)
+
+        # ═══════════════════════════════════════════
+        # 第三区：筛选 & 结果目录
+        # ═══════════════════════════════════════════
+        filter_group = QGroupBox("第三步：查看结果")
+        filter_group.setStyleSheet("QGroupBox{font-weight:bold;font-size:13px;padding-top:6px}"
+                                   "QGroupBox::title{subcontrol-origin:margin;left:10px}")
+        filter_layout = QHBoxLayout(filter_group)
+        filter_layout.setSpacing(8)
+
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["全部", "找到", "未找到", "错误", "未查询"])
+        self.filter_combo.addItems(["全部行", "找到", "未找到", "错误", "未查询"])
+        self.filter_combo.setFixedWidth(90)
+        self.filter_combo.setToolTip(
+            "按查询状态筛选表格行：\n"
+            "• 找到：接口有返回结果\n"
+            "• 未找到：接口返回空\n"
+            "• 错误：网络或 Token 问题\n"
+            "• 未查询：尚未查询的行"
+        )
         self.filter_combo.currentIndexChanged.connect(self._apply_filter)
-        self.filter_combo.setFixedWidth(100)
-        self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("关键词搜索（素材名称）")
-        self.search_box.textChanged.connect(self._apply_filter)
-        self.search_box.setFixedWidth(220)
-        self.row_count_label = QLabel("显示: 0 / 0 行")
-        filter_row.addWidget(self.filter_combo)
-        filter_row.addWidget(QLabel("  关键词:"))
-        filter_row.addWidget(self.search_box)
-        filter_row.addWidget(self.row_count_label)
-        filter_row.addStretch()
-        vbox.addLayout(filter_row)
 
-        # === 分割：表格 + 日志 ===
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("在表格中搜索素材名称关键词...")
+        self.search_box.setFixedWidth(240)
+        self.search_box.setToolTip("输入关键词实时过滤表格，不影响查询数据")
+        self.search_box.textChanged.connect(self._apply_filter)
+
+        self.row_count_label = QLabel("显示: 0 / 0 行")
+        self.row_count_label.setStyleSheet("color:#555; font-size:12px")
+
+        filter_layout.addWidget(_label("状态筛选:"))
+        filter_layout.addWidget(self.filter_combo)
+        filter_layout.addWidget(_label("  名称搜索:"))
+        filter_layout.addWidget(self.search_box)
+        filter_layout.addWidget(self.row_count_label)
+        filter_layout.addStretch()
+
+        filter_layout.addWidget(_label("结果目录:"))
+        self.dir_label = QLabel(RESULTS_DIR)
+        self.dir_label.setStyleSheet("color:#1565C0; font-size:11px")
+        self.dir_label.setMaximumWidth(300)
+        self.dir_label.setToolTip(RESULTS_DIR)
+        btn_dir = QPushButton("更改")
+        btn_dir.setFixedWidth(50)
+        btn_dir.setFixedHeight(28)
+        btn_dir.setToolTip("更改结果 Excel 的保存目录")
+        btn_dir.clicked.connect(self._choose_results_dir)
+        filter_layout.addWidget(self.dir_label)
+        filter_layout.addWidget(btn_dir)
+
+        vbox.addWidget(filter_group)
+
+        # ═══════════════════════════════════════════
+        # 表格 + 日志（可拖拽分隔）
+        # ═══════════════════════════════════════════
         splitter = QSplitter(Qt.Orientation.Vertical)
 
         self.table = QTableWidget()
@@ -283,68 +469,57 @@ class MainWindow(QMainWindow):
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
         self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.table.setSortingEnabled(True)
+        self.table.setStyleSheet(
+            "QTableWidget{gridline-color:#e0e0e0; font-size:12px}"
+            "QHeaderView::section{background:#f5f5f5;font-weight:bold;padding:4px;"
+            "border:1px solid #ddd}"
+        )
         self.table.keyPressEvent = self._table_key_press
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._table_context_menu)
         splitter.addWidget(self.table)
 
-        log_g = QGroupBox("运行日志")
+        log_g = QGroupBox("运行日志  （实时显示查询进度和错误信息）")
+        log_g.setStyleSheet("QGroupBox{font-size:12px;color:#555}")
         log_l = QVBoxLayout(log_g)
         log_l.setContentsMargins(4, 4, 4, 4)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setFont(QFont("Menlo", 11))
-        self.log_text.setMaximumHeight(180)
+        self.log_text.setMaximumHeight(160)
+        self.log_text.setStyleSheet("background:#1e1e1e; color:#d4d4d4; border:none")
         log_l.addWidget(self.log_text)
         splitter.addWidget(log_g)
 
-        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(0, 5)
         splitter.setStretchFactor(1, 1)
         vbox.addWidget(splitter, 1)
 
-        # === 按钮行 ===
-        btn_row = QHBoxLayout()
-        def _btn(text, color, hover, slot):
-            b = QPushButton(text)
-            b.setFixedHeight(34)
-            b.setStyleSheet(
-                f"QPushButton{{background:{color};color:white;font-size:13px;"
-                f"border-radius:4px;padding:0 14px}}"
-                f"QPushButton:hover{{background:{hover}}}"
-                f"QPushButton:disabled{{background:#bbb}}"
-            )
-            b.clicked.connect(slot)
-            return b
-
-        self.btn_search    = _btn("开始查询",    "#4CAF50", "#388E3C", self._start_search)
-        self.btn_stop      = _btn("停止",        "#f44336", "#c62828", self._stop_search)
-        self.btn_stop.setEnabled(False)
-        self.btn_workbench = _btn("加入工作台",  "#2196F3", "#1565C0", self._add_to_workbench)
-        self.btn_save      = _btn("保存 Excel",  "#FF9800", "#E65100", self._save_excel)
-        self.btn_token     = _btn("刷新 Token",  "#607D8B", "#37474F", self._refresh_token)
-        self.btn_requery_errors = _btn("重查错误行", "#9C27B0", "#6A1B9A", self._requery_errors)
-        self.btn_reset_all      = _btn("重置全部重查", "#795548", "#4E342E", self._reset_all)
-
-        for b in [self.btn_search, self.btn_stop, self.btn_workbench,
-                  self.btn_requery_errors, self.btn_reset_all, self.btn_save, self.btn_token]:
-            btn_row.addWidget(b)
-        btn_row.addStretch()
-        vbox.addLayout(btn_row)
-
-        # === 工作台统计 + 进度 ===
+        # ═══════════════════════════════════════════
+        # 底部：统计 + 进度条
+        # ═══════════════════════════════════════════
         bottom = QHBoxLayout()
-        self.wb_stats = QLabel("工作台: 总计 0 | 已推 0 批 | 剩余 0")
-        self.wb_stats.setStyleSheet("color:#1565C0; font-weight:bold")
-        self.stats_label = QLabel("找到:0 | 未找到:0 | 错误:0 | 跳过:0")
-        self.progress = QProgressBar()
-        self.progress.setFixedHeight(22)
-        bottom.addWidget(self.wb_stats)
-        bottom.addStretch()
+        self.stats_label = QLabel("找到: 0 行 / 0 个视频  |  未找到: 0  |  错误: 0  |  未查: 0")
+        self.stats_label.setStyleSheet("font-size:12px; font-weight:bold; color:#333")
+
+        self.wb_stats = QLabel("工作台：尚未推送")
+        self.wb_stats.setStyleSheet("color:#1565C0; font-size:12px; font-weight:bold")
+
         bottom.addWidget(self.stats_label)
+        bottom.addStretch()
+        bottom.addWidget(self.wb_stats)
         vbox.addLayout(bottom)
+
+        self.progress = QProgressBar()
+        self.progress.setFixedHeight(20)
+        self.progress.setStyleSheet(
+            "QProgressBar{border:1px solid #ccc;border-radius:4px;background:#f5f5f5;text-align:center}"
+            "QProgressBar::chunk{background:#43A047;border-radius:4px}"
+        )
         vbox.addWidget(self.progress)
 
         self.status_bar = QStatusBar()
+        self.status_bar.setStyleSheet("font-size:12px")
         self.setStatusBar(self.status_bar)
 
     # ──────────── Token ────────────
@@ -377,20 +552,26 @@ class MainWindow(QMainWindow):
 
     def _on_token_ok(self, token):
         self.token = token
-        self._log("Token 获取成功")
-        self.status_bar.showMessage("Token 就绪")
+        self._log("Token 获取成功，可以开始查询")
+        self.status_bar.showMessage("Token 就绪 ✓")
         self.btn_token.setEnabled(True)
+        self.token_indicator.setText("● Token 已就绪")
+        self.token_indicator.setStyleSheet("color:#43A047; font-size:12px; font-weight:bold")
 
     def _on_token_fail_silent(self, err):
-        self._log(f"自动获取失败，请点「刷新 Token」: {err}")
-        self.status_bar.showMessage("请点「刷新 Token」并在浏览器登录")
+        self._log(f"自动获取 Token 失败，请点「刷新登录」按钮后在浏览器中登录: {err}")
+        self.status_bar.showMessage("请点「刷新登录」在浏览器中登录")
         self.btn_token.setEnabled(True)
+        self.token_indicator.setText("● Token 未就绪  点「刷新登录」")
+        self.token_indicator.setStyleSheet("color:#e53935; font-size:12px; font-weight:bold")
 
     def _on_token_fail(self, err):
         self._log(f"Token 获取失败: {err}")
         self.status_bar.showMessage("Token 获取失败")
         self.btn_token.setEnabled(True)
-        QMessageBox.warning(self, "失败", f"获取失败，请确认浏览器已打开并登录\n\n{err}")
+        self.token_indicator.setText("● Token 获取失败  点「刷新登录」")
+        self.token_indicator.setStyleSheet("color:#e53935; font-size:12px; font-weight:bold")
+        QMessageBox.warning(self, "登录失败", f"获取失败，请确认浏览器已打开并登录\n\n{err}")
 
     # ──────────── 日志 ────────────
 
@@ -460,28 +641,69 @@ class MainWindow(QMainWindow):
     # ──────────── 文件 / Sheet ────────────
 
     def _open_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "打开 Excel", "",
-                                              "Excel Files (*.xlsx *.xls)")
-        if not path: return
+        dialog = QFileDialog(self, "打开 Excel / CSV / Numbers")
+        dialog.setNameFilters([
+            "表格文件 (*.xlsx *.xls *.csv *.numbers)",
+            "Excel 文件 (*.xlsx *.xls)",
+            "CSV 文件 (*.csv)",
+            "Numbers 文件 (*.numbers)",
+            "所有文件 (*)",
+        ])
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        if dialog.exec() != QFileDialog.DialogCode.Accepted:
+            return
+        files = dialog.selectedFiles()
+        if not files:
+            return
+        path = files[0]
+        if not path:
+            return
         self.excel_path = path
         self.file_label.setText(os.path.basename(path))
         try:
-            xls = pd.ExcelFile(path, engine="openpyxl")
-            self.sheet_names = xls.sheet_names
-            self.sheet_combo.blockSignals(True)
-            self.sheet_combo.clear()
-            self.sheet_combo.addItems(self.sheet_names)
-            self.sheet_combo.blockSignals(False)
-            # 自动检测是否有表头
-            self._auto_detect_header(path, self.sheet_names[0])
-            self._load_sheet(self.sheet_names[0])
+            if path.lower().endswith(".csv"):
+                # CSV 文件：单 sheet
+                self.sheet_names = ["Sheet1"]
+                self.sheet_combo.blockSignals(True)
+                self.sheet_combo.clear()
+                self.sheet_combo.addItems(self.sheet_names)
+                self.sheet_combo.blockSignals(False)
+                self._load_sheet("Sheet1")
+            elif path.lower().endswith(".numbers"):
+                # Apple Numbers 文件
+                sheets_data = _read_numbers_file(path)
+                self._numbers_data = sheets_data
+                self.sheet_names = list(sheets_data.keys())
+                self.sheet_combo.blockSignals(True)
+                self.sheet_combo.clear()
+                self.sheet_combo.addItems(self.sheet_names)
+                self.sheet_combo.blockSignals(False)
+                self._load_sheet(self.sheet_names[0])
+            else:
+                # 先尝试 openpyxl，失败则 xlrd
+                try:
+                    xls = pd.ExcelFile(path, engine="openpyxl")
+                except Exception:
+                    xls = pd.ExcelFile(path, engine="xlrd")
+                self.sheet_names = xls.sheet_names
+                self.sheet_combo.blockSignals(True)
+                self.sheet_combo.clear()
+                self.sheet_combo.addItems(self.sheet_names)
+                self.sheet_combo.blockSignals(False)
+                self._auto_detect_header(path, self.sheet_names[0])
+                self._load_sheet(self.sheet_names[0])
         except Exception as e:
-            QMessageBox.critical(self, "错误", str(e))
+            QMessageBox.critical(self, "导入失败", f"无法读取文件:\n{path}\n\n{e}")
 
     def _auto_detect_header(self, path, sheet):
         """检测第一行是否包含表头关键词，自动设置复选框"""
+        if path.lower().endswith(".csv"):
+            return
         try:
-            df_raw = pd.read_excel(path, sheet_name=sheet, engine="openpyxl", header=None, nrows=1)
+            try:
+                df_raw = pd.read_excel(path, sheet_name=sheet, engine="openpyxl", header=None, nrows=1)
+            except Exception:
+                df_raw = pd.read_excel(path, sheet_name=sheet, engine="xlrd", header=None, nrows=1)
             first_row_vals = [str(v).strip() for v in df_raw.iloc[0].tolist()]
             header_keywords = {"素材名称", "查询状态", "视频ID", "视频id", "名称", "状态"}
             has_header = bool(header_keywords & set(first_row_vals))
@@ -496,47 +718,115 @@ class MainWindow(QMainWindow):
         if 0 <= idx < len(self.sheet_names):
             self._load_sheet(self.sheet_names[idx])
 
+    def _on_header_changed(self):
+        """首行是否表头 切换时重新加载"""
+        self._update_header_hint()
+        if self.excel_path and self.current_sheet:
+            self._load_sheet(self.current_sheet)
+
+    def _update_header_hint(self):
+        if not hasattr(self, "header_hint"):
+            return
+        if self.chk_header.isChecked():
+            self.header_hint.setText("第一行作为列名，数据从第二行开始")
+        else:
+            self.header_hint.setText("无列名，第一行就是数据，列名自动生成为「列1、列2...」")
+
     def _load_sheet(self, sheet):
         try:
             has_header = self.chk_header.isChecked()
             header_arg = 0 if has_header else None
-            self.df = pd.read_excel(self.excel_path, sheet_name=sheet,
-                                    engine="openpyxl", header=header_arg)
+            if self.excel_path.lower().endswith(".csv"):
+                self.df = pd.read_csv(self.excel_path, header=header_arg, encoding="utf-8-sig")
+            elif self.excel_path.lower().endswith(".numbers"):
+                raw_df = getattr(self, "_numbers_data", {}).get(sheet, pd.DataFrame())
+                self.df = raw_df.reset_index(drop=True).copy()
+                # numbers 文件已有表头，has_header 强制视为 True
+                has_header = True
+            else:
+                try:
+                    self.df = pd.read_excel(self.excel_path, sheet_name=sheet,
+                                            engine="openpyxl", header=header_arg)
+                except Exception:
+                    self.df = pd.read_excel(self.excel_path, sheet_name=sheet,
+                                            engine="xlrd", header=header_arg)
+
             if not has_header:
-                # 生成列名，第一列命名为素材名称
-                cols = [f"列{i+1}" for i in range(len(self.df.columns))]
-                cols[0] = "素材名称"
-                self.df.columns = cols
-                # 如果某列的第一行值是"查询状态"等关键词，说明是之前程序追加的列，删掉重建
-                drop_cols = []
-                for c in self.df.columns:
-                    if str(self.df[c].iloc[0]).strip() in {"查询状态", "视频ID", "查询备注", "查询时间", "匹配名称"}:
-                        drop_cols.append(c)
+                # 无表头：生成「列1 / 列2 / ...」列名
+                self.df.columns = [f"列{i+1}" for i in range(len(self.df.columns))]
+                # 清理旧结果列（如已追加过查询结果列）
+                drop_cols = [c for c in self.df.columns
+                             if not self.df.empty and
+                             str(self.df[c].iloc[0]).strip() in
+                             {"查询状态", "视频ID", "查询备注", "查询时间", "匹配名称"}]
                 if drop_cols:
                     self.df.drop(columns=drop_cols, inplace=True)
-                    self._log(f"检测到旧结果列 {drop_cols}，已移除并重建")
+                    self._log(f"检测到旧结果列 {drop_cols}，已移除")
 
             self.current_sheet = sheet
             for col in ["查询状态", "视频ID", "匹配名称", "查询备注", "查询时间"]:
                 if col not in self.df.columns:
                     self.df[col] = ""
                 else:
-                    # 有表头时，保留已有状态（断点续查）
-                    pass
+                    self.df[col] = self.df[col].fillna("").astype(str)
 
-            self._log(f"加载 [{sheet}]: {len(self.df)} 行  表头={'有' if has_header else '无'}")
+            self._log(f"加载 [{sheet}]: {len(self.df)} 行，{'有' if has_header else '无'}表头")
             self.start_spin.setMaximum(max(0, len(self.df) - 1))
+
+            # 构建搜索列下拉：有表头显示列名，无表头显示「列N: 首行内容预览」
             self.col_combo.clear()
-            self.col_combo.addItems([str(c) for c in self.df.columns])
-            if "素材名称" in self.df.columns:
-                self.col_combo.setCurrentText("素材名称")
-            else:
-                self.col_combo.setCurrentIndex(0)
+            result_cols = {"查询状态", "视频ID", "匹配名称", "查询备注", "查询时间"}
+            for c in self.df.columns:
+                if str(c) in result_cols:
+                    continue  # 结果列不放进搜索列选项
+                if has_header:
+                    self.col_combo.addItem(str(c), userData=c)
+                else:
+                    # 取第一行内容作为预览
+                    preview = str(self.df[c].iloc[0])[:20] if not self.df.empty else ""
+                    self.col_combo.addItem(f"{c}: {preview}", userData=c)
+
+            # 自动选中「素材名称」列，或内容最像素材名称的列
+            best = self._guess_name_col(has_header)
+            if best is not None:
+                for i in range(self.col_combo.count()):
+                    if self.col_combo.itemData(i) == best:
+                        self.col_combo.setCurrentIndex(i)
+                        break
+
             self._update_stats_label()
             self._apply_filter()
-            self.status_bar.showMessage(f"[{sheet}] {len(self.df)} 行")
+            self.status_bar.showMessage(f"[{sheet}] {len(self.df)} 行  ({'有表头' if has_header else '无表头，请在「搜索列」选择素材名称列'})")
         except Exception as e:
-            QMessageBox.critical(self, "错误", str(e))
+            QMessageBox.critical(self, "加载失败", str(e))
+
+    def _guess_name_col(self, has_header):
+        """猜测哪一列是素材名称列"""
+        if self.df is None or self.df.empty:
+            return None
+        result_cols = {"查询状态", "视频ID", "匹配名称", "查询备注", "查询时间"}
+        data_cols = [c for c in self.df.columns if str(c) not in result_cols]
+        if not data_cols:
+            return None
+        # 有表头：优先匹配列名
+        if has_header:
+            keywords = ["素材名称", "素材", "名称", "name", "视频名", "标题"]
+            for kw in keywords:
+                for c in data_cols:
+                    if kw in str(c).lower():
+                        return c
+        # 无表头 or 未命中：找内容最长、最像名称的列（字符串且平均长度>5）
+        best_col, best_score = None, 0
+        for c in data_cols:
+            sample = self.df[c].dropna().astype(str).head(10)
+            avg_len = sample.str.len().mean() if len(sample) > 0 else 0
+            # 像名称的特征：含中文、含连字符、长度适中
+            has_chinese = sample.str.contains(r'[\u4e00-\u9fff]', regex=True).mean()
+            score = avg_len * 0.5 + has_chinese * 10
+            if score > best_score:
+                best_score = score
+                best_col = c
+        return best_col
 
     # ──────────── 筛选 ────────────
 
@@ -545,13 +835,13 @@ class MainWindow(QMainWindow):
             return
         status_filter = self.filter_combo.currentText()
         keyword = self.search_box.text().strip().lower()
-        name_col = self.col_combo.currentText()
+        name_col = self.col_combo.currentData() or self.col_combo.currentText()
 
-        mask = pd.Series([True] * len(self.df))
+        mask = pd.Series([True] * len(self.df), index=self.df.index)
 
         if status_filter == "未查询":
             mask &= self.df["查询状态"].astype(str).str.strip() == ""
-        elif status_filter != "全部":
+        elif status_filter not in ("全部行", "全部"):
             mask &= self.df["查询状态"].astype(str).str.strip() == status_filter
 
         if keyword and name_col in self.df.columns:
@@ -567,7 +857,7 @@ class MainWindow(QMainWindow):
         self.table.setColumnCount(len(df.columns))
         self.table.setHorizontalHeaderLabels([str(c) for c in df.columns])
 
-        name_col = self.col_combo.currentText()
+        name_col = self.col_combo.currentData() or self.col_combo.currentText()
         key_cols = {name_col, "查询状态", "视频ID", "匹配名称", "查询备注", "查询时间"}
 
         color_map = {"找到": "#C8E6C9", "未找到": "#FFF9C4", "错误": "#FFCDD2"}
@@ -662,7 +952,7 @@ class MainWindow(QMainWindow):
     def _start_search(self):
         if self.df is None:
             QMessageBox.warning(self, "提示", "请先导入 Excel"); return
-        name_col = self.col_combo.currentText()
+        name_col = self.col_combo.currentData() or self.col_combo.currentText()
         if not name_col or name_col not in self.df.columns:
             QMessageBox.warning(self, "提示", "请选择搜索列"); return
         if not self.token:
@@ -673,10 +963,13 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(True)
         self.progress.setMaximum(len(self.df))
         self.progress.setValue(0)
-        self._log(f"开始查询 | 列:{name_col} | 起始行:{self.start_spin.value()}")
+
+        max_count_map = {"每条最多 60 个": 60, "每条最多 120 个": 120, "每条最多 300 个": 300, "每条获取全部": -1}
+        max_count = max_count_map.get(self.max_count_combo.currentText(), 60)
+        self._log(f"开始查询 | 列:{name_col} | 起始行:{self.start_spin.value()} | 最大结果:{self.max_count_combo.currentText()}")
 
         self.search_worker = SearchWorker(
-            self.df, name_col, self.start_spin.value(), self.token)
+            self.df, name_col, self.start_spin.value(), self.token, max_count)
         self.search_worker.progress.connect(
             lambda c, t: self.progress.setValue(c))
         self.search_worker.row_done.connect(self._update_row)
@@ -782,7 +1075,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请先导入并查询"); return
 
         all_ids = []
-        for v in self.df[self.df["查询状态"] == "找到"]["视频ID"].dropna():
+        for v in self.df[self.df["查询状态"].astype(str).str.strip() == "找到"]["视频ID"].dropna():
             for sid in str(v).split(","):
                 sid = sid.strip()
                 if sid and sid not in ("nan", ""):

@@ -182,17 +182,36 @@ def get_token() -> str:
     return token
 
 
-def search_video(token: str, name: str):
-    payload = {
-        "length": 60, "start": 0, "videoType": 0, "order": 1,
-        "sortField": 1, "sortOrder": 1, "name": name,
-        "commentType": 0, "dyStatCostType": 0, "isPubArea": 0,
-        "searchType": 1, "linkIdJson": "[]", "isUseCache": "",
-    }
-    try:
-        resp = _session.post(QUERY_URL, data=encode_form(payload),
-                             headers=make_headers(token), timeout=15)
-        data = resp.json()
+def search_video(token: str, name: str, max_count: int = 60):
+    """
+    max_count: 最多获取条数，-1 表示全部（自动翻页）
+    """
+    PAGE_SIZE = 60
+    all_items = []
+    start = 0
+
+    while True:
+        payload = [
+            ("length", PAGE_SIZE), ("start", start), ("videoType", 0), ("order", 1),
+            ("sortField", 1), ("sortOrder", ""), ("categoryId", ""),
+            ("parentTypeId", ""), ("typeIdStr", ""), ("labelIds", ""),
+            ("burstType", ""), ("name", name), ("videoState", ""),
+            ("durationBegin", ""), ("durationEnd", ""),
+            ("statCostStart", ""), ("statCostEnd", ""),
+            ("payOrderAmountStart", ""), ("payOrderAmountEnd", ""),
+            ("isRelationOtherMaterial", ""), ("isCollectionVideo", ""),
+            ("roiStart", ""), ("roiEnd", ""),
+            ("commentType", 0), ("dyStatCostType", 0), ("isPubArea", 0),
+            ("searchType", 1), ("linkIdJson", "[]"), ("isUseCache", ""),
+            ("searchVideoIds", ""), ("advertiserIdStr", ""), ("materialIdStr", ""),
+        ]
+        try:
+            hdrs = make_headers(token)
+            hdrs.pop("Content-Type", None)
+            resp = _session.post(QUERY_URL, data=payload, headers=hdrs, timeout=15)
+            data = resp.json()
+        except Exception as e:
+            return False, "", {"error": str(e)}
 
         if not data.get("success"):
             err = data.get("info", "API 返回失败")
@@ -202,32 +221,32 @@ def search_video(token: str, name: str):
 
         items = data.get("data", {}).get("list", [])
         total = data.get("data", {}).get("total", 0)
+        all_items.extend(items)
 
+        # 判断是否继续翻页
         if not items:
-            return False, "", {}
+            break
+        if max_count != -1 and len(all_items) >= max_count:
+            all_items = all_items[:max_count]
+            break
+        if len(all_items) >= total:
+            break
+        start += PAGE_SIZE
 
-        # 收集所有返回的视频（API 按名称搜索，返回的都是相关结果）
-        all_ids = [str(v.get("videoId", "")) for v in items]
-        all_raws = items
-        # 精确匹配的放前面
-        matched = [v for v in items if v.get("name", "").strip() == name.strip()]
+    if not all_items:
+        return False, "", {"info": "接口返回空列表"}
 
-        if matched:
-            v = matched[0]
-            return True, ",".join(all_ids), {
-                "videoState": v.get("videoState", ""),
-                "sumStatCost": v.get("sumStatCost", 0),
-                "sumPayOrderAmount": v.get("sumPayOrderAmount", 0),
-                "sumRoi": v.get("sumRoi", 0),
-                "match_count": len(items),
-                "all_ids": all_ids,
-                "all_raws": all_raws,
-            }
-        else:
-            first_name = items[0].get("name", "") if items else ""
-            return False, "", {"info": f"返回{total}条无精确匹配，第一条: {first_name}"}
-    except Exception as e:
-        return False, "", {"error": str(e)}
+    all_ids = [str(v.get("videoId", "")) for v in all_items]
+    v = all_items[0]
+    return True, ",".join(all_ids), {
+        "videoState": v.get("videoState", ""),
+        "sumStatCost": v.get("sumStatCost", 0),
+        "sumPayOrderAmount": v.get("sumPayOrderAmount", 0),
+        "sumRoi": v.get("sumRoi", 0),
+        "match_count": len(all_items),
+        "total": total,
+        "all_raws": all_items,
+    }
 
 
 def fetch_video_objects_by_ids(token: str, video_ids: list) -> list:
